@@ -433,8 +433,8 @@ mod test {
 
     pub(crate) fn setup_nodes() -> (String, bitcoind::BitcoinD, ElectrsD) {
         let (bitcoind_exe, electrs_exe) = init();
-        debug!("bitcoind: {}", &bitcoind_exe);
-        debug!("electrs: {}", &electrs_exe);
+        debug!("bitcoind: {}", bitcoind_exe);
+        debug!("electrs: {}", electrs_exe);
         let mut conf = bitcoind::Conf::default();
         conf.view_stdout = log_enabled!(Level::Debug);
         let bitcoind = bitcoind::BitcoinD::with_conf(&bitcoind_exe, &conf).unwrap();
