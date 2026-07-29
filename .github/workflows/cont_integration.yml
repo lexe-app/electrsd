@@ -1,108 +1,83 @@
+name: CI
+
 on:
   push:
     branches:
       - master
-  pull_request: {}
+  pull_request:
+  workflow_dispatch:
 
-name: CI
+permissions:
+  contents: read
 
 jobs:
-
   build:
-    strategy:
-      matrix:
-        os: ["macos-14", "ubuntu-24.04", "windows-2022"]
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out electrsd
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
       - run: cargo build
 
-  corepc-node-versions:
-    name: Test a bunch of corepc-node versions.
-    runs-on: ubuntu-24.04
+  test-downloads:
+    name: Test pre-built downloads
+    runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
       RUST_LOG: debug
-    strategy:
-      matrix:
-        features:
-          - corepc-node_29_0,electrs_0_10_6
-          - corepc-node_28_2,electrs_0_10_6
-          - corepc-node_27_2,electrs_0_10_6
-          - corepc-node_26_2,electrs_0_10_6
-          - corepc-node_25_2,electrs_0_10_6
-          - corepc-node_24_2,electrs_0_10_6
-          - corepc-node_23_1,electrs_0_10_6
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features ${{ matrix.features }}
 
-  test-electrs:
-    name: Test Electrs
-    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out electrsd
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features download
+
+  test-nix:
+    name: Test Nix electrs package
+    runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
+      ELECTRSD_SKIP_DOWNLOAD: "1"
+      ELECTRS_EXEC: ${{ github.workspace }}/result/bin/electrs
       RUST_LOG: debug
-    strategy:
-      matrix:
-        features:
-          - corepc-node_22_1,electrs_0_8_10
-          - corepc-node_22_1,electrs_0_9_1
-          - corepc-node_22_1,electrs_0_9_11
-          - corepc-node_22_1,electrs_0_10_6
-      fail-fast: false
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out electrsd
+        uses: actions/checkout@v7
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.11.0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features ${{ matrix.features }}
-
-
-  test-electrs-esplora:
-    name: Test Electrs Esplora
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_TERM_COLOR: always
-    strategy:
-      matrix:
-        features: ["corepc-node_22_1,legacy,esplora_a33e97e1"]
-
-    steps:
-      - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features ${{ matrix.features }}
-
-  test-electrs-no-download:
-    name: Test Electrs no auto-download features
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_TERM_COLOR: always
-      ELECTRS_EXEC: "/home/runner/.cargo-install/electrs/bin/electrs"
-    steps:
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install electrs
-        # Automatically cache installed binaries to avoid compiling them each run
-        uses: baptiste0928/cargo-install@v2
-        with:
-          crate: electrs
-      - run: "echo $ELECTRS_EXEC"
-      - name: Checkout Crate
-        uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --features 'corepc-node_25_2'
+      - name: Build blockstream-electrs
+        run: nix-build default.nix -A blockstream-electrs --out-link result
+      - run: cargo test --features download
 
   cosmetics:
-    runs-on: ubuntu-24.04
+    name: Formatting and lints
+    runs-on: ubuntu-latest
+    env:
+      BITCOIND_SKIP_DOWNLOAD: "1"
+      ELECTRSD_SKIP_DOWNLOAD: "1"
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out electrsd
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt -- --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
