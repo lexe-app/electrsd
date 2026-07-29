@@ -1,4 +1,7 @@
+/.git-blame-ignore-revs
 /target
+/result
+/result-*
 Cargo.lock
 .idea/
 bin/
