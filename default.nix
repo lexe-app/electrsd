@@ -34,6 +34,13 @@ in
 
     nativeBuildInputs = [ targetPkgs.rustPlatform.bindgenHook ];
 
+    # Rust defaults to static PIE for musl, but nixpkgs' static libstdc++ is not
+    # built as position-independent code. A non-PIE executable remains fully
+    # static and links cleanly against the bundled RocksDB C++ code.
+    env = targetPkgs.lib.optionalAttrs (system == "x86_64-linux") {
+      RUSTFLAGS = "-C relocation-model=static";
+    };
+
     # Use the platform allocator and build the bundled RocksDB. The latter
     # avoids the crashes we have observed with dynamically linked RocksDB.
     postPatch = ''
