@@ -24,13 +24,11 @@ env_logger = { version = "0.10" }
 
 [build-dependencies]
 bitcoin_hashes = { version = "0.14", optional = true }
-zip = { version = "0.6", default-features = false, optional = true, features = [
+bitreq = { version = "0.3.7", features = ["https"], optional = true }
+zip = { version = "0.6.6", default-features = false, optional = true, features = [
   "bzip2",
   "deflate",
 ] }
-minreq = { version = "2.9.0", default-features = false, optional = true, features = [
-  "https",
-] }
 
 [features]
-download = ["dep:bitcoin_hashes", "dep:zip", "dep:minreq", "bitcoind/download"]
+download = ["dep:bitcoin_hashes", "dep:bitreq", "dep:zip", "bitcoind/download"]
