@@ -3,18 +3,18 @@
 //!
 //! Electrsd
 //!
-//! Utility to run a regtest electrsd process, useful in integration testing environment
+//! Test harness for running Blockstream electrs with a Bitcoin Core regtest node.
 //!
 
 mod error;
 mod ext;
 mod versions;
 
-use corepc_node::anyhow::Context;
-use corepc_node::get_available_port;
-use corepc_node::serde_json::Value;
-use corepc_node::tempfile::TempDir;
-use corepc_node::{anyhow, Node};
+use bitcoind::anyhow::Context;
+use bitcoind::get_available_port;
+use bitcoind::serde_json::Value;
+use bitcoind::tempfile::TempDir;
+use bitcoind::{anyhow, BitcoinD};
 use electrum_client::raw_client::{ElectrumPlaintextStream, RawClient};
 use log::{debug, error, warn};
 use std::env;
@@ -23,8 +23,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-// re-export corepc_node
-pub use corepc_node;
+// re-export bitcoind
+pub use bitcoind;
 // re-export corepc_client
 pub use corepc_client;
 // re-export electrum_client because calling RawClient methods requires the ElectrumApi trait
@@ -48,7 +48,7 @@ pub use error::Error;
 #[non_exhaustive]
 pub struct Conf<'a> {
     /// Electrsd command line arguments
-    /// note that `db-dir`, `cookie`, `cookie-file`, `daemon-rpc-addr`, `jsonrpc-import`, `electrum-rpc-addr`, `monitoring-addr`, `http-addr`  cannot be used cause they are automatically initialized.
+    /// note that `db-dir`, `cookie`, `daemon-rpc-addr`, `jsonrpc-import`, `electrum-rpc-addr`, `monitoring-addr`, `http-addr` cannot be used because they are initialized automatically.
     pub args: Vec<&'a str>,
 
     /// if `true` electrsd log output will not be suppressed
@@ -85,18 +85,8 @@ pub struct Conf<'a> {
 
 impl Default for Conf<'_> {
     fn default() -> Self {
-        let args = if cfg!(feature = "electrs_0_9_1")
-            || cfg!(feature = "electrs_0_8_10")
-            || cfg!(feature = "esplora_a33e97e1")
-            || cfg!(feature = "legacy")
-        {
-            vec!["-vvv"]
-        } else {
-            vec![]
-        };
-
         Conf {
-            args,
+            args: vec!["-vvv"],
             view_stderr: false,
             http_enabled: false,
             network: "regtest",
@@ -142,14 +132,14 @@ impl DataDir {
 
 impl ElectrsD {
     /// Create a new electrs process connected with the given bitcoind and default args.
-    pub fn new<S: AsRef<OsStr>>(exe: S, bitcoind: &Node) -> anyhow::Result<ElectrsD> {
+    pub fn new<S: AsRef<OsStr>>(exe: S, bitcoind: &BitcoinD) -> anyhow::Result<ElectrsD> {
         ElectrsD::with_conf(exe, bitcoind, &Conf::default())
     }
 
     /// Create a new electrs process using given [Conf] connected with the given bitcoind
     pub fn with_conf<S: AsRef<OsStr>>(
         exe: S,
-        bitcoind: &Node,
+        bitcoind: &BitcoinD,
         conf: &Conf,
     ) -> anyhow::Result<ElectrsD> {
         let response = bitcoind.client.call::<Value>("getblockchaininfo", &[])?;
@@ -189,46 +179,15 @@ impl ElectrsD {
         args.push("--network");
         args.push(conf.network);
 
-        #[cfg(not(feature = "legacy"))]
-        let cookie_file;
-        #[cfg(not(feature = "legacy"))]
-        {
-            args.push("--cookie-file");
-            cookie_file = format!("{}", bitcoind.params.cookie_file.display());
-            args.push(&cookie_file);
-        }
-
-        #[cfg(feature = "legacy")]
-        let mut cookie_value;
-        #[cfg(feature = "legacy")]
-        {
-            use std::io::Read;
-            args.push("--cookie");
-            let mut cookie = std::fs::File::open(&bitcoind.params.cookie_file)?;
-            cookie_value = String::new();
-            cookie.read_to_string(&mut cookie_value)?;
-            args.push(&cookie_value);
-        }
+        args.push("--cookie");
+        let cookie = std::fs::read_to_string(&bitcoind.params.cookie_file)?;
+        args.push(&cookie);
 
         args.push("--daemon-rpc-addr");
         let rpc_socket = bitcoind.params.rpc_socket.to_string();
         args.push(&rpc_socket);
 
-        let p2p_socket;
-        if cfg!(feature = "electrs_0_8_10")
-            || cfg!(feature = "esplora_a33e97e1")
-            || cfg!(feature = "legacy")
-        {
-            args.push("--jsonrpc-import");
-        } else {
-            args.push("--daemon-p2p-addr");
-            p2p_socket = bitcoind
-                .params
-                .p2p_socket
-                .expect("electrs_0_9_1 requires bitcoind with p2p port open")
-                .to_string();
-            args.push(&p2p_socket);
-        }
+        args.push("--jsonrpc-import");
 
         let electrum_url = format!("0.0.0.0:{}", get_available_port()?);
         args.push("--electrum-rpc-addr");
@@ -315,14 +274,13 @@ impl ElectrsD {
         match self.work_dir {
             DataDir::Persistent(_) => {
                 self.inner_kill()?;
-                // Wait for the process to exit
-                match self.process.wait() {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e.into()),
-                }
             }
-            DataDir::Temporary(_) => Ok(self.process.kill()?),
+            DataDir::Temporary(_) => self.process.kill()?,
         }
+
+        // Ensure callers cannot race the process while it is shutting down.
+        self.process.wait()?;
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -346,9 +304,10 @@ impl Drop for ElectrsD {
     }
 }
 
-/// Provide the electrs executable path if a version feature has been specified and `ELECTRSD_SKIP_DOWNLOAD` is not set.
+/// Provide the downloaded electrs executable path when the `download` feature
+/// is enabled and `ELECTRSD_SKIP_DOWNLOAD` is not set.
 pub fn downloaded_exe_path() -> Option<String> {
-    if versions::HAS_FEATURE && std::env::var_os("ELECTRSD_SKIP_DOWNLOAD").is_none() {
+    if cfg!(feature = "download") && std::env::var_os("ELECTRSD_SKIP_DOWNLOAD").is_none() {
         Some(format!(
             "{}/electrs/{}/electrs",
             env!("OUT_DIR"),
@@ -362,7 +321,7 @@ pub fn downloaded_exe_path() -> Option<String> {
 /// Returns the daemon `electrs` executable with the following precedence:
 ///
 /// 1) If it's specified in the `ELECTRS_EXEC` or in `ELECTRS_EXE` env var (errors if both env vars are present)
-/// 2) If there is no env var but an auto-download feature such as `electrs_0_9_11` is enabled, returns the path of the downloaded executabled
+/// 2) If there is no env var but `download` is enabled, returns the path of the downloaded executable
 /// 3) If neither of the precedent are available, the `electrs` executable is searched in the `PATH`
 pub fn exe_path() -> anyhow::Result<String> {
     if let (Ok(_), Ok(_)) = (std::env::var("ELECTRS_EXEC"), std::env::var("ELECTRS_EXE")) {
@@ -422,7 +381,6 @@ pub fn exe_path() -> anyhow::Result<String> {
 mod test {
     use crate::exe_path;
     use crate::ElectrsD;
-    use corepc_node::P2P;
     use electrum_client::ElectrumApi;
     use log::{debug, log_enabled, Level};
     use std::env;
@@ -467,22 +425,19 @@ mod test {
     fn test_kill() {
         let (_, bitcoind, mut electrsd) = setup_nodes();
         let _ = bitcoind.client.get_network_info().unwrap(); // without using bitcoind, it is dropped and all the rest fails.
-        let _ = electrsd.client.ping().unwrap();
+        electrsd.client.ping().unwrap();
         assert!(electrsd.client.ping().is_ok());
         electrsd.kill().unwrap();
         assert!(electrsd.client.ping().is_err());
     }
 
-    pub(crate) fn setup_nodes() -> (String, corepc_node::Node, ElectrsD) {
+    pub(crate) fn setup_nodes() -> (String, bitcoind::BitcoinD, ElectrsD) {
         let (bitcoind_exe, electrs_exe) = init();
         debug!("bitcoind: {}", &bitcoind_exe);
         debug!("electrs: {}", &electrs_exe);
-        let mut conf = corepc_node::Conf::default();
+        let mut conf = bitcoind::Conf::default();
         conf.view_stdout = log_enabled!(Level::Debug);
-        if !cfg!(feature = "electrs_0_8_10") && !cfg!(feature = "esplora_a33e97e1") {
-            conf.p2p = P2P::Yes;
-        }
-        let bitcoind = corepc_node::Node::with_conf(&bitcoind_exe, &conf).unwrap();
+        let bitcoind = bitcoind::BitcoinD::with_conf(&bitcoind_exe, &conf).unwrap();
         let electrs_conf = crate::Conf {
             view_stderr: log_enabled!(Level::Debug),
             ..Default::default()
@@ -493,7 +448,7 @@ mod test {
 
     fn init() -> (String, String) {
         let _ = env_logger::try_init();
-        let bitcoind_exe_path = corepc_node::exe_path().unwrap();
+        let bitcoind_exe_path = bitcoind::exe_path().unwrap();
         let electrs_exe_path = exe_path().unwrap();
         (bitcoind_exe_path, electrs_exe_path)
     }
